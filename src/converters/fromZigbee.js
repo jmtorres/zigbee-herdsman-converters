@@ -3486,6 +3486,7 @@ const converters = {
         options: [exposes.options.legacy()],
         convert: (model, msg, publish, options, meta) => {
             if (hasAlreadyProcessedMessage(msg, model)) return;
+            globalStore.putValue(msg.endpoint, 'arrow_release', Date.now());
             const direction = globalStore.getValue(msg.endpoint, 'direction');
             if (direction) {
                 globalStore.clearValue(msg.endpoint, 'direction');
@@ -3493,6 +3494,36 @@ const converters = {
                 const result = {action: `arrow_${direction}_release`, duration, action_duration: duration};
                 if (!isLegacyEnabled(options)) delete result.duration;
                 return result;
+            }
+        },
+    },
+    ikea_command_move: {
+        cluster: 'genLevelCtrl',
+        type: ['commandMove', 'commandMoveWithOnOff'],
+        convert: (model, msg, publish, options, meta) => {
+            if (hasAlreadyProcessedMessage(msg, model)) return;
+            const direction = msg.data.movemode === 1 ? 'down' : 'up';
+            globalStore.putValue(msg.endpoint, 'direction', direction);
+            const action = postfixWithEndpointName(`brightness_move_${direction}`, msg, model, meta);
+            const payload = {action, action_rate: msg.data.rate};
+            addActionGroup(payload, msg, model);
+            return payload;
+        },
+    },
+    ikea_command_stop: {
+        cluster: 'genLevelCtrl',
+        type: ['commandStop', 'commandStopWithOnOff'],
+        options: [exposes.options.legacy()],
+        convert: (model, msg, publish, options, meta) => {
+            if (hasAlreadyProcessedMessage(msg, model)) return;
+            const direction = globalStore.getValue(msg.endpoint, 'direction');
+            if (direction) {
+                globalStore.clearValue(msg.endpoint, 'direction');
+                const duration = msg.data.value / 1000;
+                const payload = {action: postfixWithEndpointName(`brightness_${direction}_stop`, msg, model, meta), duration, action_duration: duration};
+                if (!isLegacyEnabled(options)) delete payload.duration;
+                            addActionGroup(payload, msg, model);
+                return payload;
             }
         },
     },
