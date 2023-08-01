@@ -12,7 +12,7 @@ const e = exposes.presets;
 const ea = exposes.access;
 const herdsman = require('zigbee-herdsman');
 const {
-    calibrateAndPrecisionRoundOptions, postfixWithEndpointName, getMetaValue, precisionRound,
+    calibrateAndPrecisionRoundOptions, postfixWithEndpointName, getMetaValue, precisionRound, hasAlreadyProcessedMessage, isLegacyEnabled, addActionGroup,
 } = require('../lib/utils');
 
 const bulbOnEvent = async (type, data, device, options, state) => {
@@ -222,27 +222,81 @@ const ikea = {
             cluster: 'genOnOff',
             type: 'commandOn',
             convert: (model, msg, publish, options, meta) => {
-                if (utils.hasAlreadyProcessedMessage(msg, model)) return;
+                if (hasAlreadyProcessedMessage(msg, model)) return;
                 const arrowReleaseAgo = Date.now() - globalStore.getValue(msg.endpoint, 'arrow_release', 0);
                 if (arrowReleaseAgo > 700) {
                     return {action: 'on'};
                 }
             },
         },
-        styrbar_arrow_release: {
+        ikea_arrow_click: {
+            cluster: 'genScenes',
+            type: 'commandTradfriArrowSingle',
+            convert: (model, msg, publish, options, meta) => {
+                if (hasAlreadyProcessedMessage(msg, model)) return;
+                if (msg.data.value === 2) {
+                    // This is send on toggle hold, ignore it as a toggle_hold is already handled above.
+                    return;
+                }
+
+                const direction = msg.data.value === 257 ? 'left' : 'right';
+                return {action: `arrow_${direction}_click`};
+            },
+        },
+        ikea_arrow_hold: {
+            cluster: 'genScenes',
+            type: 'commandTradfriArrowHold',
+            convert: (model, msg, publish, options, meta) => {
+                if (hasAlreadyProcessedMessage(msg, model)) return;
+                const direction = msg.data.value === 3329 ? 'left' : 'right';
+                globalStore.putValue(msg.endpoint, 'direction', direction);
+                return {action: `arrow_${direction}_hold`};
+            },
+        },
+        ikea_arrow_release: {
             cluster: 'genScenes',
             type: 'commandTradfriArrowRelease',
             options: [exposes.options.legacy()],
             convert: (model, msg, publish, options, meta) => {
-                if (utils.hasAlreadyProcessedMessage(msg, model)) return;
+                if (hasAlreadyProcessedMessage(msg, model)) return;
                 globalStore.putValue(msg.endpoint, 'arrow_release', Date.now());
                 const direction = globalStore.getValue(msg.endpoint, 'direction');
                 if (direction) {
                     globalStore.clearValue(msg.endpoint, 'direction');
                     const duration = msg.data.value / 1000;
                     const result = {action: `arrow_${direction}_release`, duration, action_duration: duration};
-                    if (!utils.isLegacyEnabled(options)) delete result.duration;
+                    if (!isLegacyEnabled(options)) delete result.duration;
                     return result;
+                }
+            },
+        },
+        ikea_command_move: {
+            cluster: 'genLevelCtrl',
+            type: ['commandMove', 'commandMoveWithOnOff'],
+            convert: (model, msg, publish, options, meta) => {
+                if (hasAlreadyProcessedMessage(msg, model)) return;
+                const direction = msg.data.movemode === 1 ? 'down' : 'up';
+                globalStore.putValue(msg.endpoint, 'direction', direction);
+                const action = postfixWithEndpointName(`brightness_move_${direction}`, msg, model, meta);
+                const payload = {action, action_rate: msg.data.rate};
+                addActionGroup(payload, msg, model);
+                return payload;
+            },
+        },
+        ikea_command_stop: {
+            cluster: 'genLevelCtrl',
+            type: ['commandStop', 'commandStopWithOnOff'],
+            options: [exposes.options.legacy()],
+            convert: (model, msg, publish, options, meta) => {
+                if (hasAlreadyProcessedMessage(msg, model)) return;
+                const direction = globalStore.getValue(msg.endpoint, 'direction');
+                if (direction) {
+                    globalStore.clearValue(msg.endpoint, 'direction');
+                    const duration = msg.data.value / 1000;
+                    const payload = {action: postfixWithEndpointName(`brightness_stop_${direction}`, msg, model, meta), duration, action_duration: duration};
+                    if (!isLegacyEnabled(options)) delete payload.duration;
+                    addActionGroup(payload, msg, model);
+                    return payload;
                 }
             },
         },
@@ -745,10 +799,10 @@ module.exports = [
         model: 'E2001/E2002',
         vendor: 'IKEA',
         description: 'STYRBAR remote control',
-        fromZigbee: [ikea.fz.battery, ikea.fz.styrbar_on, fz.command_off, fz.command_move, fz.command_stop, fz.ikea_arrow_click,
-            fz.ikea_arrow_hold, ikea.fz.styrbar_arrow_release],
+        fromZigbee: [ikea.fz.battery, ikea.fz.styrbar_on, fz.command_off, ikea.fz.ikea_command_move, ikea.fz.ikea_command_stop, ikea.fz.ikea_arrow_click,
+            ikea.fz.ikea_arrow_hold, ikea.fz.ikea_arrow_release],
         exposes: [e.battery().withAccess(ea.STATE_GET), e.action(['on', 'off', 'brightness_move_up', 'brightness_move_down',
-            'brightness_stop', 'arrow_left_click', 'arrow_right_click', 'arrow_left_hold',
+            'brightness_stop_up', 'brightness_stop_down', 'arrow_left_click', 'arrow_right_click', 'arrow_left_hold',
             'arrow_right_hold', 'arrow_left_release', 'arrow_right_release'])],
         toZigbee: [tz.battery_percentage_remaining],
         ota: ota.tradfri,
@@ -1212,11 +1266,11 @@ module.exports = [
         model: 'E2201',
         vendor: 'IKEA',
         description: 'RODRET wireless dimmer/power switch',
-        fromZigbee: [fz.battery, fz.command_on, fz.command_off, fz.command_move, fz.command_stop],
+        fromZigbee: [ikea.fz.battery, fz.command_on, fz.command_off, ikea.fz.ikea_command_move, ikea.fz.ikea_command_stop],
         toZigbee: [tz.battery_percentage_remaining],
         exposes: [
             e.battery().withAccess(ea.STATE_GET),
-            e.action(['on', 'off', 'brightness_move_down', 'brightness_move_up', 'brightness_stop']),
+            e.action(['on', 'off', 'brightness_move_down', 'brightness_move_up', 'brightness_stop_down', 'brightness_stop_up']),
         ],
         ota: ota.tradfri,
         configure: async (device, coordinatorEndpoint, logger) => {
